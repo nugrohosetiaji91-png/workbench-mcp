@@ -2,6 +2,27 @@
 
 A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows workstation into a full AI-agent workbench. Built for Claude Desktop (stdio transport), pure Python standard library - no `pip install` required.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    C[Claude Desktop] <-->|stdio JSON-RPC| S[server.py]
+
+    S --> SH[run_command<br/>PowerShell]
+    S --> PY[run_python<br/>inline exec]
+    S --> F[file<br/>read / write / analyze]
+    S --> M[(FTS5 memory<br/>SQLite)]
+    S --> SSH[vps<br/>SSH fleet]
+    S --> W[web<br/>search / fetch]
+    S --> SELF[self / think / task<br/>meta-cognition]
+
+    SSH --> R1[remote host 1]
+    SSH --> R2[remote host N]
+    F --> BIG[multi-MB logs<br/>stats / anomalies / patterns]
+```
+
+Single file, single process: Claude Desktop spawns `server.py` over stdio, every tool call is a JSON-RPC request, and all state (memory DB, experience log) lives next to the script.
+
 ## Features
 
 **System control**
