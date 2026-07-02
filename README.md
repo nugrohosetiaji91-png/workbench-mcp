@@ -52,7 +52,7 @@ Single file, single process: Claude Desktop spawns `server.py` over stdio, every
 
 ## Real-world usage
 
-This is not a demo project. This server is my daily driver: it powers an AI assistant that manages my Windows workstation - auditing and patching trading-bot code, running log analytics on multi-MB files, executing remote commands on production VPS hosts over SSH, and accumulating knowledge in the FTS5 memory across sessions. This repository itself was sanitized, validated, and published to GitHub by an AI agent running through this exact server.
+This is not a demo project. This server is my daily driver: it powers an AI assistant that manages my Windows workstation - auditing and patching trading-bot code, running log analytics on multi-MB files, executing remote commands on production VPS hosts over SSH, and accumulating knowledge in the FTS5 memory across sessions. This repository itself was sanitized, validated, and published to GitHub through this exact server - the whole pipeline, from secret-stripping to the git push, ran on its own tools.
 
 ## Why zero dependencies?
 
