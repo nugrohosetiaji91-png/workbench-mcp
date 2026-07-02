@@ -1,13 +1,13 @@
 # workbench-mcp
 
-A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows workstation into a full AI-agent workbench. Built for Claude Desktop (stdio transport), pure Python standard library â€” no `pip install` required.
+A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows workstation into a full AI-agent workbench. Built for Claude Desktop (stdio transport), pure Python standard library - no `pip install` required.
 
 ## Features
 
 **System control**
-- `run_command` â€” PowerShell execution with timeout control
-- `run_python` â€” inline Python execution for data processing and validation
-- `system` â€” process listing, kill, system info, screenshots
+- `run_command` - PowerShell execution with timeout control
+- `run_python` - inline Python execution for data processing and validation
+- `system` - process listing, kill, system info, screenshots
 
 **Persistent memory**
 - SQLite **FTS5 full-text search** knowledge base with automatic index triggers
@@ -15,19 +15,19 @@ A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows w
 
 **File intelligence**
 - Read / write / list / regex search across the filesystem
-- Built-in big-data analysis modes: `stats`, `numbers`, `patterns`, `anomalies`, `distribution` â€” summarize multi-MB log files without flooding the model context
+- Built-in big-data analysis modes: `stats`, `numbers`, `patterns`, `anomalies`, `distribution` - summarize multi-MB log files without flooding the model context
 
 **Remote fleet (SSH)**
 - Run commands on remote Linux servers via configurable host aliases
 - Includes an env-normalization layer that fixes Windows OpenSSH failures under Claude Desktop's stripped process environment (missing `PROGRAMDATA` / `PATHEXT` / `COMSPEC`)
 
 **Domain example: trading-bot log analytics**
-- Deterministic parser for structured bot logs: win/loss stats, profit factor, PnL per exit-reason and per hour, hold-duration analysis â€” demonstrates how to give an agent *reliable* analytics instead of letting it guess from raw text
+- Deterministic parser for structured bot logs: win/loss stats, profit factor, PnL per exit-reason and per hour, hold-duration analysis - demonstrates how to give an agent *reliable* analytics instead of letting it guess from raw text
 
 **Meta-cognition**
-- `think` â€” forces first-principles reasoning before actions
-- `self` â€” experience logging, review, and self-improvement loop
-- `task` â€” multi-step executor with progress notes
+- `think` - forces first-principles reasoning before actions
+- `self` - experience logging, review, and self-improvement loop
+- `task` - multi-step executor with progress notes
 
 ## Why zero dependencies?
 
@@ -63,7 +63,7 @@ Claude Desktop launches stdio MCP servers with a stripped environment where virt
 
 ## Architecture notes
 
-- **stdio JSON-RPC** loop, no framework â€” the full MCP handshake (`initialize`, `tools/list`, `tools/call`) implemented directly for transparency
+- **stdio JSON-RPC** loop, no framework - the full MCP handshake (`initialize`, `tools/list`, `tools/call`) implemented directly for transparency
 - FTS5 external-content table with `INSERT`/`UPDATE`/`DELETE` triggers keeping the index in sync
 - All subprocess calls carry explicit timeouts; SSH uses `BatchMode=yes` so a hung auth prompt can never freeze the agent
 
