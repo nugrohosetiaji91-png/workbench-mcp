@@ -29,6 +29,10 @@ A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows w
 - `self` - experience logging, review, and self-improvement loop
 - `task` - multi-step executor with progress notes
 
+## Real-world usage
+
+This is not a demo project. This server is my daily driver: it powers an AI assistant that manages my Windows workstation - auditing and patching trading-bot code, running log analytics on multi-MB files, executing remote commands on production VPS hosts over SSH, and accumulating knowledge in the FTS5 memory across sessions. This repository itself was sanitized, validated, and published to GitHub by an AI agent running through this exact server.
+
 ## Why zero dependencies?
 
 Claude Desktop launches stdio MCP servers with a stripped environment where virtualenvs and PATH-dependent tooling often break. A single stdlib-only file is the most robust deployment unit: copy, point your config at it, done.
