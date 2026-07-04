@@ -9,7 +9,7 @@ A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows w
 ## Architecture
 
 <p align="center">
-  <img src="assets/architecture.png" alt="Workbench MCP Architecture" width="100%">
+  <img src="assets/arch.png" alt="Workbench MCP Architecture" width="100%">
 </p>
 
 Single file, single process: Claude Desktop spawns `server.py` over stdio, every tool call is a JSON-RPC request, and all state (memory DB, experience log) lives next to the script.
