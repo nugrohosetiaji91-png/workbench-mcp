@@ -31,14 +31,30 @@ def _write(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
 
+MAX_SUBPROCESS_TIMEOUT = 25  # hard ceiling â€” MCP clients typically time out long before minutes
+
 def _ps(cmd, timeout=30):
+    timeout = min(timeout, MAX_SUBPROCESS_TIMEOUT)
+    proc = None
     try:
-        r = subprocess.run(["powershell", "-Command", cmd], capture_output=True, text=True, timeout=timeout, cwd=MCP_DIR)
-        parts = [s for s in [r.stdout.strip(), r.stderr.strip()] if s]
-        parts.append("[EXIT %d]" % r.returncode)
+        proc = subprocess.Popen(
+            ["powershell", "-Command", cmd],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, cwd=MCP_DIR
+        )
+        out, err = proc.communicate(timeout=timeout)
+        parts = [s for s in [out.strip(), err.strip()] if s]
+        parts.append("[EXIT %d]" % proc.returncode)
         return "\n".join(parts)
-    except subprocess.TimeoutExpired: return "Timeout (%ds)" % timeout
-    except Exception as e: return "Error: %s" % e
+    except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
+            proc.wait(timeout=5)
+        return "Timed out after %ds â€” process killed" % timeout
+    except Exception as e:
+        if proc and proc.poll() is None:
+            proc.kill()
+        return "Error: %s" % e
 
 # ═══════════════════════════════════════════
 # FTS5 MEMORY — unlimited storage, full text search
@@ -434,18 +450,29 @@ except (json.JSONDecodeError, TypeError):
     VPS_HOSTS = {}
 
 def _ssh(host, command, timeout=30):
+    timeout = min(timeout, MAX_SUBPROCESS_TIMEOUT)
     target = VPS_HOSTS.get(host, host)
     if "@" not in target:
-        return "Error: host '%s' bukan alias dikenal (%s) atau format user@ip" % (host, ", ".join(VPS_HOSTS))
+        return "Error: host '%s' is not a known alias (%s) or user@ip format" % (host, ", ".join(VPS_HOSTS))
+    proc = None
     try:
-        r = subprocess.run(
+        proc = subprocess.Popen(
             ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, command],
-            capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
-        parts = [s for s in [r.stdout.strip(), r.stderr.strip()] if s]
-        parts.append("[EXIT %d]" % r.returncode)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace")
+        out, err = proc.communicate(timeout=timeout)
+        parts = [s for s in [out.strip(), err.strip()] if s]
+        parts.append("[EXIT %d]" % proc.returncode)
         return "\n".join(parts)
-    except subprocess.TimeoutExpired: return "Timeout (%ds)" % timeout
-    except Exception as e: return "Error: %s" % e
+    except subprocess.TimeoutExpired:
+        if proc:
+            proc.kill()
+            proc.wait(timeout=5)
+        return "Timed out after %ds â€” process killed" % timeout
+    except Exception as e:
+        if proc and proc.poll() is None:
+            proc.kill()
+        return "Error: %s" % e
 
 def _botlog_report(text):
     """Trading-bot log analytics â€” deterministic structured parsing (W/L, PnL, exit reasons)."""
@@ -549,7 +576,7 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "query": {"type": "string"}, "url": {"type": "string"}, "limit": {"type": "integer", "default": 5}, "timeout": {"type": "integer", "default": 15}}, "required": ["action"]}},
     {"name": "git", "annotations": {"readOnlyHint": True, "destructiveHint": False},
      "description": "Git. action: status|log|diff.",
-     "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "path": {"type": "string", "default": "C:\\MCP"}, "n": {"type": "integer", "default": 10}}, "required": ["action"]}},
+     "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "path": {"type": "string", "default": "."}, "n": {"type": "integer", "default": 10}}, "required": ["action"]}},
     {"name": "system", "annotations": {"readOnlyHint": True, "destructiveHint": True},
      "description": "System. action: info|processes|kill|screenshot.",
      "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "filter": {"type": "string"}, "pid": {"type": "integer"}}, "required": ["action"]}},
@@ -586,18 +613,32 @@ def handle(name, args):
         return f"Analyzed ({len(thought)} chars). Proceed."
 
     elif name == "run_command":
-        return _ps(args.get("command", ""), args.get("timeout", 30))
+        return _ps(args.get("command", ""), min(args.get("timeout", 30), MAX_SUBPROCESS_TIMEOUT))
 
     elif name == "run_python":
         sc = os.path.join(MCP_DIR, ".mcp_tmp.py")
+        timeout = min(args.get("timeout", 30), MAX_SUBPROCESS_TIMEOUT)
+        proc = None
         try:
             with open(sc, "w", encoding="utf-8") as f: f.write(args["code"])
-            r = subprocess.run(["python", sc], capture_output=True, text=True, timeout=min(args.get("timeout", 30), 120), cwd=MCP_DIR)
-            parts = [s for s in [r.stdout.strip(), "[STDERR] " + r.stderr.strip() if r.stderr.strip() else ""] if s]
-            parts.append("[EXIT %d]" % r.returncode)
+            proc = subprocess.Popen(
+                ["python", sc],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, cwd=MCP_DIR
+            )
+            out, err = proc.communicate(timeout=timeout)
+            parts = [s for s in [out.strip(), "[STDERR] " + err.strip() if err.strip() else ""] if s]
+            parts.append("[EXIT %d]" % proc.returncode)
             return "\n".join(parts)
-        except subprocess.TimeoutExpired: return "Timeout"
-        except Exception as e: return "Error: %s" % e
+        except subprocess.TimeoutExpired:
+            if proc:
+                proc.kill()
+                proc.wait(timeout=5)
+            return "Timed out after %ds â€” process killed" % timeout
+        except Exception as e:
+            if proc and proc.poll() is None:
+                proc.kill()
+            return "Error: %s" % e
         finally:
             try: os.remove(sc)
             except: pass
