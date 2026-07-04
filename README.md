@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.png" alt="Project Banner" width="100%">
+</p>
+
 # workbench-mcp
 
 A zero-dependency **MCP (Model Context Protocol) server** that turns a Windows workstation into a full AI-agent workbench. Built for Claude Desktop (stdio transport), pure Python standard library - no `pip install` required.
