@@ -882,7 +882,7 @@ TOOLS = [
      "description": "System. action: info|processes|kill|screenshot.",
      "inputSchema": {"type": "object", "properties": {"action": {"type": "string"}, "filter": {"type": "string"}, "pid": {"type": "integer"}}, "required": ["action"]}},
     {"name": "memory", "annotations": {"readOnlyHint": False, "destructiveHint": False},
-     "description": "FTS5 knowledge base. action: store|read|search. search uses full-text. Unlimited values. Prefix key with 'insight:', 'skill:', 'pattern:', 'fact:' to organize.",
+     "description": "FTS5 knowledge base. action: store|read|search. search uses full-text. Unlimited values. 5-stage key convention: 'failure:TOPIC' (log a break as it happens), 'verified:TOPIC' (a checked fact, not a guess), 'rule:TOPIC' (distilled from >=1 verified fact) - plus 'skill:'/'insight:'/'pattern:' for reusable knowledge. Always search before re-deriving something you might already know.",
      "inputSchema": {"type": "object", "properties": {"action": {"type": "string", "description": "store | read | search"}, "key": {"type": "string"}, "value": {"type": "string"}, "query": {"type": "string", "description": "FTS5 search query"}, "limit": {"type": "integer", "default": 20}}, "required": ["action"]}},
     {"name": "self", "annotations": {"readOnlyHint": False, "destructiveHint": True},
      "description": "Meta-cognition. action: log|review|improve|insight|heal.",
@@ -1053,13 +1053,19 @@ def handle(name, args):
         elif a == "kill":
             return _ps("Stop-Process -Id %d -Force" % args["pid"], 10)
         elif a == "screenshot":
-            try:
-                import mss
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                out = os.path.join(MCP_DIR, "screen_%s.png" % ts)
-                with mss.mss() as s: s.shot(mon=1, output=out)
-                return "Screenshot: %s" % out
-            except Exception as e: return "Error: %s" % e
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            out = os.path.join(MCP_DIR, "screen_%s.png" % ts)
+            ps_path = out.replace("'", "''")
+            ps = ("Add-Type -AssemblyName System.Windows.Forms,System.Drawing; "
+                  "$b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; "
+                  "$bmp=New-Object System.Drawing.Bitmap $b.Width,$b.Height; "
+                  "$g=[System.Drawing.Graphics]::FromImage($bmp); "
+                  "$g.CopyFromScreen($b.Left,$b.Top,0,0,$bmp.Size); "
+                  "$bmp.Save('%s',[System.Drawing.Imaging.ImageFormat]::Png); "
+                  "$g.Dispose(); $bmp.Dispose()") % ps_path
+            r = _ps(ps, 15)
+            if os.path.exists(out): return "Screenshot: %s" % out
+            return "Error: %s" % (r or "screenshot not written")
         return "system actions: info | processes | kill | screenshot"
 
     elif name == "memory":
