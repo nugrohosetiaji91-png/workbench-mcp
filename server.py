@@ -3,7 +3,7 @@ workbench-mcp — zero-dependency MCP server for Claude Desktop (stdio).
 FTS5 memory, big data analysis, hypothesis-driven reasoning.
 """
 
-import json, sys, os, subprocess, urllib.request, urllib.error, urllib.parse, datetime, sqlite3, re, ssl, math, time, base64, struct, socket
+import json, sys, os, subprocess, urllib.request, urllib.error, urllib.parse, datetime, sqlite3, re, ssl, math, time, base64, struct, socket, shlex, ast
 from collections import Counter, defaultdict
 
 MCP_DIR = os.environ.get("WORKBENCH_DIR", os.path.dirname(os.path.abspath(__file__)))
@@ -55,6 +55,38 @@ def _ps(cmd, timeout=30):
         if proc and proc.poll() is None:
             proc.kill()
         return "Error: %s" % e
+
+def _ps_quote(s):
+    """Safely embed a string as a single-quoted PowerShell literal (doubles
+    embedded single quotes). Fix: pattern/path/file_filter used to be
+    interpolated into -Command strings unescaped, so a value containing a
+    single quote could break out of the intended string literal."""
+    return "'" + str(s).replace("'", "''") + "'"
+
+_GIT_EXE = None
+def _find_git():
+    """Locate git.exe: WORKBENCH_GIT_EXE env var, then common install
+    paths, then PATH — instead of one hardcoded path that silently fails
+    for any other install location."""
+    global _GIT_EXE
+    if _GIT_EXE: return _GIT_EXE
+    env = os.environ.get("WORKBENCH_GIT_EXE", "")
+    if env and os.path.exists(env):
+        _GIT_EXE = env
+        return _GIT_EXE
+    for c in (r"C:\Program Files\Git\cmd\git.exe", r"C:\Program Files (x86)\Git\cmd\git.exe"):
+        if os.path.exists(c):
+            _GIT_EXE = c
+            return _GIT_EXE
+    try:
+        r = subprocess.run(["where", "git"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            _GIT_EXE = r.stdout.strip().split("\n")[0]
+            return _GIT_EXE
+    except Exception:
+        pass
+    _GIT_EXE = "git"
+    return _GIT_EXE
 
 # ═══════════════════════════════════════════
 # FTS5 MEMORY — unlimited storage, full text search
@@ -396,12 +428,26 @@ def _build_context() -> str:
 # SEARCH ENGINES
 # ═══════════════════════════════════════════
 
-def _search_wikipedia(query, limit, ctx):
+def _urlopen_verified(req, timeout=10):
+    """Verified-TLS-first HTTPS open, with unverified fallback ONLY on an
+    actual certificate-verification failure (not other network errors,
+    which still raise normally). Was ssl._create_unverified_context() on
+    every outbound call in this file - that silently accepted MITM on all
+    of them; this makes verification the default and only degrades for the
+    specific case where a target's own cert is broken."""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout, context=ssl.create_default_context())
+    except urllib.error.URLError as e:
+        if isinstance(getattr(e, "reason", None), ssl.SSLError):
+            return urllib.request.urlopen(req, timeout=timeout, context=ssl._create_unverified_context())
+        raise
+
+def _search_wikipedia(query, limit):
     url = "https://en.wikipedia.org/w/api.php?" + urllib.parse.urlencode({
         "action": "query", "list": "search", "srsearch": query, "format": "json", "srlimit": limit
     })
     req = urllib.request.Request(url, headers={"User-Agent": "PC-Tools/1.0"})
-    with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+    with _urlopen_verified(req, timeout=10) as r:
         data = json.loads(r.read().decode("utf-8", errors="replace"))
     results = data.get("query", {}).get("search", [])
     if not results: return ""
@@ -411,10 +457,10 @@ def _search_wikipedia(query, limit, ctx):
         parts.append(f"\n{i}. {r['title']}\n   https://en.wikipedia.org/wiki/{r['title'].replace(' ', '_')}\n   {snippet[:200]}...")
     return "\n".join(parts)
 
-def _search_ddg_api(query, limit, ctx):
+def _search_ddg_api(query, limit):
     url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1", "skip_disambig": "1"})
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+    with _urlopen_verified(req, timeout=10) as r:
         raw = r.read().decode("utf-8", errors="replace")
     if not raw.strip().startswith("{"): return ""
     data = json.loads(raw)
@@ -426,10 +472,10 @@ def _search_ddg_api(query, limit, ctx):
         if isinstance(t, dict) and t.get("Text"): parts.append(f"\n  - {t['Text'][:200]}")
     return "\n".join(parts) if len(parts) > 1 else ""
 
-def _search_google(query, limit, ctx):
+def _search_google(query, limit):
     url = "https://www.google.com/search?" + urllib.parse.urlencode({"q": query, "hl": "en"})
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-    with urllib.request.urlopen(req, timeout=10, context=ctx) as r:
+    with _urlopen_verified(req, timeout=10) as r:
         html = r.read().decode("utf-8", errors="replace")
     blocks = re.findall(r'<h3[^>]*>(.*?)</h3>', html, re.DOTALL)
     urls = re.findall(r'<a[^>]*href=\"(https?://[^\"]+)\"[^>]*>', html)
@@ -444,16 +490,15 @@ def _search_google(query, limit, ctx):
     return ""
 
 def _web_search(query, limit=5):
-    ctx = ssl._create_unverified_context()
     for name, fn in [("Wikipedia", _search_wikipedia), ("DDG", _search_ddg_api), ("Google", _search_google)]:
         try:
-            result = fn(query, limit, ctx)
+            result = fn(query, limit)
             if result and len(result) > 50: return result
         except: continue
     return f'Search failed: "{query}". Use web(action="fetch", url=...) instead.'
 
 # ═══════════════════════════════════════════
-# TOOLS — 11 consolidated, advanced
+# TOOLS — 15 consolidated, advanced
 # ═══════════════════════════════════════════
 
 # ═══════════════════════════════════════════
@@ -467,11 +512,15 @@ try:
 except (json.JSONDecodeError, TypeError):
     VPS_HOSTS = {}
 
-def _ssh(host, command, timeout=30):
+def _ssh(host, command, timeout=30, raw=False):
+    """raw=True returns (stdout_or_combined, returncode) for programmatic
+    callers (e.g. botlog); raw=False (default) returns the human-readable
+    combined string used everywhere else, unchanged."""
     timeout = min(timeout, MAX_SUBPROCESS_TIMEOUT)
     target = VPS_HOSTS.get(host, host)
     if "@" not in target:
-        return "Error: host '%s' is not a known alias (%s) or user@ip format" % (host, ", ".join(VPS_HOSTS))
+        msg = "Error: host '%s' is not a known alias (%s) or user@ip format" % (host, ", ".join(VPS_HOSTS))
+        return (msg, -1) if raw else msg
     proc = None
     try:
         proc = subprocess.Popen(
@@ -479,6 +528,8 @@ def _ssh(host, command, timeout=30):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace")
         out, err = proc.communicate(timeout=timeout)
+        if raw:
+            return (out if proc.returncode == 0 else out + err, proc.returncode)
         parts = [s for s in [out.strip(), err.strip()] if s]
         parts.append("[EXIT %d]" % proc.returncode)
         return "\n".join(parts)
@@ -486,11 +537,13 @@ def _ssh(host, command, timeout=30):
         if proc:
             proc.kill()
             proc.wait(timeout=5)
-        return "Timed out after %ds — process killed" % timeout
+        msg = "Timed out after %ds — process killed" % timeout
+        return (msg, -1) if raw else msg
     except Exception as e:
         if proc and proc.poll() is None:
             proc.kill()
-        return "Error: %s" % e
+        msg = "Error: %s" % e
+        return (msg, -1) if raw else msg
 
 def _botlog_report(text):
     """Trading-bot log analytics — deterministic structured parsing (W/L, PnL, exit reasons)."""
@@ -531,7 +584,7 @@ def _botlog_report(text):
             open_sec = None
         trades.append({"hour": hour, "pnl": pnl, "reason": reason, "hold": hold})
     if not trades:
-        return "Tidak ada trade close di log ini (OPEN terdeteksi: %d)" % n_open
+        return "No trade closes found in this log (OPEN detected: %d)" % n_open
     pnls = [t["pnl"] for t in trades]
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p <= 0]
@@ -828,6 +881,10 @@ _STEALTH_FP_JS = """
 
 def _stealth_launch():
     global _CDP_PROC
+    try:
+        urllib.request.urlopen(f"http://localhost:{CDP_PORT}/json/version", timeout=3)
+        return CDP_PORT  # already running - reuse it instead of tearing down live tabs/state
+    except Exception: pass
     _cdp_close()
     chrome = _cdp_find_chrome()
     if not chrome: raise Exception("Chrome not found")
@@ -852,6 +909,94 @@ def _stealth_launch():
             return CDP_PORT
         except: pass
     raise Exception("Stealth Chrome failed to start")
+
+def _browser_dispatch(a, args, stealth=False):
+    """Shared handler for both browser and stealth_browser (they were ~95%
+    duplicated - identical click/scroll/type/snapshot/screenshot/execute/
+    tabs bodies, differing only in the launcher and an output prefix).
+    stealth=True also fixes a real bug: previously only stealth_browser's
+    launch/navigate(new_tab=True) branches called _stealth_launch(); every
+    other action fell through to the plain _cdp_launch() used internally by
+    _cdp_call/_cdp_eval, so e.g. stealth_browser(action="click") as the
+    first call of a session cold-started a non-stealth Chrome despite the
+    tool name. Now every action here ensures the right launcher first."""
+    known = {"launch", "navigate", "click", "scroll", "type", "snapshot", "screenshot", "execute", "close", "tabs"}
+    tool_label = "stealth_browser" if stealth else "browser"
+    if a not in known:
+        return f"{tool_label} actions: launch | navigate | click | scroll | type | snapshot | screenshot | execute | close | tabs"
+    if a == "close":
+        return _cdp_close()
+    tag = "[STEALTH] " if stealth else ""
+    try:
+        (_stealth_launch() if stealth else _cdp_launch(headless=args.get("headless", True)))
+    except Exception as e:
+        return f"{'Stealth launch' if stealth else 'Launch'} failed: {e}"
+    if a == "launch":
+        return (f"Stealth browser launched (port={CDP_PORT}, rotating UA)" if stealth
+                else f"Browser launched (headless={args.get('headless', True)}, port={CDP_PORT})")
+    elif a == "navigate":
+        url = args.get("url", "")
+        if not url: return "url required"
+        if args.get("new_tab", True):
+            try:
+                inject = _STEALTH_FP_JS if stealth else None
+                new_idx, data, err = _cdp_new_tab_navigate(url, inject_script=inject, timeout=args.get("timeout", 20))
+                if err: return f"Tab created but nav failed: {err}"
+                return f"{tag}New tab [{new_idx}]: {data.get('title', '...')}\n{url}"
+            except Exception as e: return f"{tag}Navigate failed: {e}"
+        else:
+            ti = args.get("tab_idx", 0)
+            if stealth:
+                _cdp_call("Page.addScriptToEvaluateOnNewDocument", {"source": _STEALTH_FP_JS}, ti, args.get("timeout", 15))
+            _, err = _cdp_call("Page.navigate", {"url": url}, ti, args.get("timeout", 15))
+            if err: return f"{tag}Navigate failed: {err}"
+            return f"{tag}Navigating..."
+    elif a == "click":
+        sel = args.get("selector", "")
+        if not sel: return "selector required"
+        js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.scrollIntoView({block:'center'});el.click();return'CLICKED: '+" + json.dumps(sel) + ";})()"
+        val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
+        return str(val) if not err else f"Click failed: {err}"
+    elif a == "scroll":
+        d = args.get("direction", "down")
+        amt = args.get("amount", 500)
+        sign = "-" if d == "up" else ""
+        val, err = _cdp_eval(f"window.scrollBy({{left:0,top:{sign}{amt},behavior:'smooth'}});'SCROLLED {d} {amt}px'", args.get("tab_idx", 0), args.get("timeout", 10))
+        return str(val) if not err else f"Scroll failed: {err}"
+    elif a == "type":
+        sel = args.get("selector", "")
+        txt = args.get("text", "")
+        if not sel: return "selector required"
+        js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.focus();el.value=" + json.dumps(txt) + ";el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return'TYPED';})()"
+        val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
+        return str(val) if not err else f"Type failed: {err}"
+    elif a == "snapshot":
+        js = "(function(){var t=document.title,u=location.href,b=document.body?document.body.innerText.substring(0,6000):'';var els=document.querySelectorAll('input,textarea,select,button,a[href]');var ia=[];for(var i=0;i<Math.min(els.length,80);i++){var e=els[i];var tag=e.tagName.toLowerCase();var txt=(e.value||e.textContent||e.placeholder||e.name||e.id||'').trim().substring(0,60);var h=e.href||'';ia.push(tag+(txt?': '+txt:'')+(h?' -> '+h:''));}return JSON.stringify({title:t,url:u,body:b,inputs:ia});})()"
+        val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
+        if err: return f"Snapshot failed: {err}"
+        try:
+            data = json.loads(str(val))
+            parts = [f"{tag}TITLE: {data.get('title','')}", f"URL: {data.get('url','')}", "", "INTERACTIVE:", "\n".join(f"  {x}" for x in data.get("inputs", [])), "", data.get("body", "")]
+            return "\n".join(parts)[:8000]
+        except: return str(val)[:8000]
+    elif a == "screenshot":
+        path, err = _cdp_screenshot(args.get("tab_idx", 0), args.get("timeout", 15))
+        if err: return f"Screenshot failed: {err}"
+        return f"{tag}Screenshot: {path}"
+    elif a == "execute":
+        js = args.get("js", "")
+        if not js: return "js required"
+        val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
+        return str(val) if not err else f"JS error: {err}"
+    elif a == "tabs":
+        try:
+            r = urllib.request.urlopen(f"http://localhost:{CDP_PORT}/json", timeout=5)
+            tabs = json.loads(r.read())
+            lines = [f"{tag}Tabs ({len(tabs)}):"]
+            for i, t in enumerate(tabs):
+                lines.append(f"  [{i}] {t.get('title','?')[:80]}\n     {t.get('url','')[:120]}")
+            return "\n".join(lines)
+        except Exception as e: return f"Tabs error: {e}"
 
 TOOLS = [
     {"name": "think", "annotations": {"readOnlyHint": True, "destructiveHint": False},
@@ -922,6 +1067,34 @@ TOOLS = [
 # ═══════════════════════════════════════════
 # HANDLER
 # ═══════════════════════════════════════════
+
+_SAFE_COND_NODES = (
+    ast.Expression, ast.Compare, ast.BoolOp, ast.UnaryOp, ast.Not,
+    ast.And, ast.Or, ast.Name, ast.Load,
+    ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.In, ast.NotIn,
+    ast.Constant,
+)
+
+def _safe_eval_condition(cond, result):
+    """Restricted evaluator for task(loop_until)'s stop condition. Plain
+    eval(cond, {"__builtins__": {}}, ...) is a well-known insufficient
+    sandbox (escapable via attribute/introspection tricks like
+    ().__class__.__bases__) even with builtins stripped. This parses the
+    condition to an AST and rejects anything outside a small whitelist -
+    comparisons, membership tests, boolean logic, literals, and the single
+    name 'result' - before compiling or evaluating it at all, so no
+    Call/Attribute/Subscript/Import node ever reaches eval()."""
+    try:
+        tree = ast.parse(cond, mode="eval")
+    except SyntaxError as e:
+        raise ValueError("Invalid condition syntax: %s" % e)
+    for node in ast.walk(tree):
+        if not isinstance(node, _SAFE_COND_NODES):
+            raise ValueError("Disallowed in condition: %s" % type(node).__name__)
+        if isinstance(node, ast.Name) and node.id != "result":
+            raise ValueError("Only the 'result' variable is allowed, got '%s'" % node.id)
+    code = compile(tree, "<condition>", "eval")
+    return bool(eval(code, {"__builtins__": {}}, {"result": result}))
 
 def handle(name, args):
     if name == "think":
@@ -996,9 +1169,9 @@ def handle(name, args):
             pat = args.get("pattern", "")
             pth = args.get("path", MCP_DIR)
             ff = args.get("file_filter", "")
-            cmd = "Get-ChildItem '%s' -Recurse -Depth 5 -EA 0" % pth
-            if ff: cmd += " -Filter '%s'" % ff
-            cmd += " | Select-String -Pattern '%s' -EA 0 | Select -First 30 | ForEach-Object { $_.Filename + ':' + $_.LineNumber + ' ' + $_.Line.Trim() }" % pat
+            cmd = "Get-ChildItem %s -Recurse -Depth 5 -EA 0" % _ps_quote(pth)
+            if ff: cmd += " -Filter %s" % _ps_quote(ff)
+            cmd += " | Select-String -Pattern %s -EA 0 | Select -First 30 | ForEach-Object { $_.Filename + ':' + $_.LineNumber + ' ' + $_.Line.Trim() }" % _ps_quote(pat)
             return _ps(cmd, 30)[:8000]
         elif a == "analyze":
             return _analyze_file(p, args.get("analysis_type", "stats"))
@@ -1011,8 +1184,7 @@ def handle(name, args):
         elif a == "fetch":
             try:
                 req = urllib.request.Request(args["url"], headers={"User-Agent": "Mozilla/5.0"})
-                ctx = ssl._create_unverified_context()
-                with urllib.request.urlopen(req, timeout=min(args.get("timeout", 15), 60), context=ctx) as r:
+                with _urlopen_verified(req, timeout=min(args.get("timeout", 15), 60)) as r:
                     c = r.read().decode("utf-8", errors="replace")
                 return c[:10000] + ("\n[...%d total chars]" % len(c) if len(c) > 10000 else "")
             except urllib.error.HTTPError as e: return "HTTP %d: %s" % (e.code, e.reason)
@@ -1023,12 +1195,13 @@ def handle(name, args):
         a = args.get("action", "")
         p = args.get("path", MCP_DIR)
         n = args.get("n", 10)
+        git_exe = _ps_quote(_find_git())
         if a == "status":
-            cmd = "& 'C:\\Program Files\\Git\\cmd\\git.exe' -C '%s' status 2>&1" % p
+            cmd = "& %s -C %s status 2>&1" % (git_exe, _ps_quote(p))
         elif a == "log":
-            cmd = "& 'C:\\Program Files\\Git\\cmd\\git.exe' -C '%s' log --oneline -%d 2>&1" % (p, n)
+            cmd = "& %s -C %s log --oneline -%d 2>&1" % (git_exe, _ps_quote(p), n)
         elif a == "diff":
-            cmd = "& 'C:\\Program Files\\Git\\cmd\\git.exe' -C '%s' diff 2>&1" % p
+            cmd = "& %s -C %s diff 2>&1" % (git_exe, _ps_quote(p))
         else: return "git actions: status | log | diff"
         return _ps(cmd, 15)
 
@@ -1260,7 +1433,7 @@ def handle(name, args):
                     result = "ERROR: %s" % ex
                 lines.append("Iteration %d [%s]: %s" % (i, t, str(result)[:200]))
                 try:
-                    done = bool(eval(cond, {"__builtins__": {}}, {"result": result}))
+                    done = _safe_eval_condition(cond, result)
                 except Exception as ex:
                     lines.append("Check expression error: %s (stopping)" % ex)
                     break
@@ -1312,13 +1485,9 @@ def handle(name, args):
         if not path: return "path required (e.g. ~/logs/bot.log or C:\\logs\\bot.log)"
         try:
             if host:
-                target = VPS_HOSTS.get(host, host)
-                r = subprocess.run(
-                    ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", target, "cat %s" % path],
-                    capture_output=True, text=True, timeout=60, encoding="utf-8", errors="replace")
-                if r.returncode != 0:
-                    return "SSH/cat gagal: %s" % (r.stderr.strip()[:300] or "exit %d" % r.returncode)
-                text = r.stdout
+                text, rc = _ssh(host, "cat %s" % shlex.quote(path), args.get("timeout", 30), raw=True)
+                if rc != 0:
+                    return "SSH/cat gagal: %s" % ((text or "").strip()[:300] or "exit %d" % rc)
             else:
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     text = f.read()
@@ -1337,152 +1506,10 @@ def handle(name, args):
         except Exception as e: return "Error: %s" % e
 
     elif name == "browser":
-        a = args.get("action", "")
-        if a == "launch":
-            hl = args.get("headless", True)
-            try:
-                _cdp_launch(headless=hl)
-                return f"Browser launched (headless={hl}, port={CDP_PORT})"
-            except Exception as e: return f"Launch failed: {e}"
-        elif a == "navigate":
-            url = args.get("url", "")
-            if not url: return "url required"
-            if args.get("new_tab", True):
-                try:
-                    _cdp_launch(headless=True)
-                    new_idx, data, err = _cdp_new_tab_navigate(url, timeout=args.get("timeout", 20))
-                    if err: return f"Tab created but nav failed: {err}"
-                    return f"New tab [{new_idx}]: {data.get('title', '...')}\n{url}"
-                except Exception as e: return f"Navigate failed: {e}"
-            else:
-                ti = args.get("tab_idx", 0)
-                _, err = _cdp_call("Page.navigate", {"url": url}, ti, args.get("timeout", 15))
-                if err: return f"Navigate failed: {err}"
-                return "Navigating..."
-        elif a == "click":
-            sel = args.get("selector", "")
-            if not sel: return "selector required"
-            js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.scrollIntoView({block:'center'});el.click();return'CLICKED: '+" + json.dumps(sel) + ";})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Click failed: {err}"
-        elif a == "scroll":
-            d = args.get("direction", "down")
-            amt = args.get("amount", 500)
-            sign = "-" if d == "up" else ""
-            val, err = _cdp_eval(f"window.scrollBy({{left:0,top:{sign}{amt},behavior:'smooth'}});'SCROLLED {d} {amt}px'", args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Scroll failed: {err}"
-        elif a == "type":
-            sel = args.get("selector", "")
-            txt = args.get("text", "")
-            if not sel: return "selector required"
-            js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.focus();el.value=" + json.dumps(txt) + ";el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return'TYPED';})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Type failed: {err}"
-        elif a == "snapshot":
-            js = "(function(){var t=document.title,u=location.href,b=document.body?document.body.innerText.substring(0,6000):'';var els=document.querySelectorAll('input,textarea,select,button,a[href]');var ia=[];for(var i=0;i<Math.min(els.length,80);i++){var e=els[i];var tag=e.tagName.toLowerCase();var txt=(e.value||e.textContent||e.placeholder||e.name||e.id||'').trim().substring(0,60);var h=e.href||'';ia.push(tag+(txt?': '+txt:'')+(h?' -> '+h:''));}return JSON.stringify({title:t,url:u,body:b,inputs:ia});})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            if err: return f"Snapshot failed: {err}"
-            try:
-                data = json.loads(str(val))
-                parts = [f"TITLE: {data.get('title','')}", f"URL: {data.get('url','')}", "", "INTERACTIVE:", "\n".join(f"  {x}" for x in data.get("inputs", [])), "", data.get("body", "")]
-                return "\n".join(parts)[:8000]
-            except: return str(val)[:8000]
-        elif a == "screenshot":
-            path, err = _cdp_screenshot(args.get("tab_idx", 0), args.get("timeout", 15))
-            if err: return f"Screenshot failed: {err}"
-            return f"Screenshot: {path}"
-        elif a == "execute":
-            js = args.get("js", "")
-            if not js: return "js required"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"JS error: {err}"
-        elif a == "close":
-            return _cdp_close()
-        elif a == "tabs":
-            try:
-                _cdp_launch(headless=True)
-                r = urllib.request.urlopen(f"http://localhost:{CDP_PORT}/json", timeout=5)
-                tabs = json.loads(r.read())
-                lines = [f"Tabs ({len(tabs)}):"]
-                for i, t in enumerate(tabs):
-                    lines.append(f"  [{i}] {t.get('title','?')[:80]}\n     {t.get('url','')[:120]}")
-                return "\n".join(lines)
-            except Exception as e: return f"Tabs error: {e}"
-        return "browser actions: launch | navigate | click | scroll | type | snapshot | screenshot | execute | close | tabs"
+        return _browser_dispatch(args.get("action", ""), args, stealth=False)
 
     elif name == "stealth_browser":
-        a = args.get("action", "")
-        if a == "launch":
-            try:
-                _stealth_launch()
-                return f"Stealth browser launched (port={CDP_PORT}, rotating UA)"
-            except Exception as e: return f"Stealth launch failed: {e}"
-        elif a == "navigate":
-            url = args.get("url", "")
-            if not url: return "url required"
-            if args.get("new_tab", True):
-                try:
-                    _stealth_launch()
-                    new_idx, data, err = _cdp_new_tab_navigate(url, inject_script=_STEALTH_FP_JS, timeout=args.get("timeout", 20))
-                    if err: return f"Tab created but nav failed: {err}"
-                    return f"[STEALTH] New tab [{new_idx}]: {data.get('title', '...')}\n{url}"
-                except Exception as e: return f"Stealth navigate failed: {e}"
-            else:
-                ti = args.get("tab_idx", 0)
-                _cdp_call("Page.addScriptToEvaluateOnNewDocument", {"source": _STEALTH_FP_JS}, ti, args.get("timeout", 15))
-                _, err = _cdp_call("Page.navigate", {"url": url}, ti, args.get("timeout", 15))
-                if err: return f"Stealth navigate failed: {err}"
-                return "Navigating (stealth)..."
-        elif a == "click":
-            sel = args.get("selector", "")
-            if not sel: return "selector required"
-            js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.scrollIntoView({block:'center'});el.click();return'CLICKED: '+" + json.dumps(sel) + ";})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Click failed: {err}"
-        elif a == "scroll":
-            d = args.get("direction", "down")
-            amt = args.get("amount", 500)
-            sign = "-" if d == "up" else ""
-            val, err = _cdp_eval(f"window.scrollBy({{left:0,top:{sign}{amt},behavior:'smooth'}});'SCROLLED {d} {amt}px'", args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Scroll failed: {err}"
-        elif a == "type":
-            sel = args.get("selector", "")
-            txt = args.get("text", "")
-            if not sel: return "selector required"
-            js = "(function(){var el=document.querySelector(" + json.dumps(sel) + ");if(!el)return'NOT FOUND';el.focus();el.value=" + json.dumps(txt) + ";el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));return'TYPED';})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"Type failed: {err}"
-        elif a == "snapshot":
-            js = "(function(){var t=document.title,u=location.href,b=document.body?document.body.innerText.substring(0,6000):'';var els=document.querySelectorAll('input,textarea,select,button,a[href]');var ia=[];for(var i=0;i<Math.min(els.length,80);i++){var e=els[i];var tag=e.tagName.toLowerCase();var txt=(e.value||e.textContent||e.placeholder||e.name||e.id||'').trim().substring(0,60);var h=e.href||'';ia.push(tag+(txt?': '+txt:'')+(h?' -> '+h:''));}return JSON.stringify({title:t,url:u,body:b,inputs:ia});})()"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            if err: return f"Snapshot failed: {err}"
-            try:
-                data = json.loads(str(val))
-                parts = [f"[STEALTH] TITLE: {data.get('title','')}", f"URL: {data.get('url','')}", "", "INTERACTIVE:", "\n".join(f"  {x}" for x in data.get("inputs", [])), "", data.get("body", "")]
-                return "\n".join(parts)[:8000]
-            except: return str(val)[:8000]
-        elif a == "screenshot":
-            path, err = _cdp_screenshot(args.get("tab_idx", 0), args.get("timeout", 15))
-            if err: return f"Screenshot failed: {err}"
-            return f"[STEALTH] Screenshot: {path}"
-        elif a == "execute":
-            js = args.get("js", "")
-            if not js: return "js required"
-            val, err = _cdp_eval(js, args.get("tab_idx", 0), args.get("timeout", 10))
-            return str(val) if not err else f"JS error: {err}"
-        elif a == "close":
-            return _cdp_close()
-        elif a == "tabs":
-            try:
-                _cdp_launch(headless=True)
-                r = urllib.request.urlopen(f"http://localhost:{CDP_PORT}/json", timeout=5)
-                tabs = json.loads(r.read())
-                lines = [f"[STEALTH] Tabs ({len(tabs)}):"]
-                for i, t in enumerate(tabs):
-                    lines.append(f"  [{i}] {t.get('title','?')[:80]}\n     {t.get('url','')[:120]}")
-                return "\n".join(lines)
-            except Exception as e: return f"Tabs error: {e}"
-        return "stealth_browser actions: launch | navigate | click | scroll | type | snapshot | screenshot | execute | close | tabs"
+        return _browser_dispatch(args.get("action", ""), args, stealth=True)
 
     return "Unknown tool: %s" % name
 
